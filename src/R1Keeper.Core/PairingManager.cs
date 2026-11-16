@@ -34,6 +34,7 @@ public sealed class PairingManager
     private int _failures;
     private DateTimeOffset _notBefore = DateTimeOffset.MinValue;
     private volatile KeeperState _state;
+    private bool _subscribed;
 
     public PairingManager(IPultBluetooth bt, ISettingsStore store, RetryPolicy retry, Func<DateTimeOffset> now, Action<string> log)
     {
@@ -56,6 +57,178 @@ public sealed class PairingManager
     public event Action<KeeperState>? StateChanged;
 
     public event Action<ulong>? PultLearned;
+
+    /// <summary>Works out the starting state, subscribes to Bluetooth events and starts listening.</summary>
+    public async Task StartAsync()
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_state != KeeperState.Paused && _address is { } address)
+            {
+                try
+                {
+                    if (await _bt.IsPairedAsync(address).ConfigureAwait(false) &&
+                        await _bt.IsConnectedAsync(address).ConfigureAwait(false))
+                    {
+                        // If this pairing is in fact stale, the pult will advertise and the
+                        // advertisement rule takes over.
+                        _bt.WatchLink(address);
+                        SetState(KeeperState.Connected);
+                    }
+                }
+                catch (Exception e)
+                {
+                    _log("reading the starting state failed: " + e.Message);
+                }
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        if (!_subscribed)
+        {
+            _subscribed = true;
+            _bt.AdvertisementReceived += adv => _ = Guarded(() => HandleAdvertisementAsync(adv));
+            _bt.LinkLost += address => _ = Guarded(() => HandleLinkLostAsync(address));
+        }
+
+        try
+        {
+            _bt.Start();
+        }
+        catch (Exception e)
+        {
+            _log("starting Bluetooth failed: " + e.Message);
+        }
+    }
+
+    /// <summary>
+    /// The link dropped. Remove the pairing straight away so the next wake-up starts from
+    /// the fast path and Windows does not spin in its failing reconnect loop.
+    /// </summary>
+    public async Task HandleLinkLostAsync(ulong address)
+    {
+        if (_state == KeeperState.Paused || address != _address) return;
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_state == KeeperState.Paused || address != _address) return;
+            bool connected = true;
+            try
+            {
+                connected = await _bt.IsConnectedAsync(address).ConfigureAwait(false);
+                // A live link means this event is late: it was queued before a fresh
+                // re-pair. Leave that pairing alone.
+                if (!connected && await _bt.IsPairedAsync(address).ConfigureAwait(false))
+                {
+                    bool removed = await _bt.UnpairAsync(address).ConfigureAwait(false);
+                    _log(removed ? "link lost; pairing removed" : "link lost; removing the pairing failed");
+                }
+            }
+            catch (Exception e)
+            {
+                connected = false;
+                _log("handling the lost link threw: " + e.Message);
+            }
+
+            if (!connected && _state == KeeperState.Connected) SetState(KeeperState.Absent);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Stops all automation and removes the pult's pairing, so the pult can be used with
+    /// another device (otherwise Windows keeps reconnecting to it every second).
+    /// </summary>
+    public async Task PauseAsync()
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await UnpairIfPairedAsync("pause").ConfigureAwait(false);
+            _settings.Paused = true;
+            _store.Save(_settings);
+            SetState(KeeperState.Paused);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task ResumeAsync()
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _settings.Paused = false;
+            _store.Save(_settings);
+            _failures = 0;
+            _notBefore = DateTimeOffset.MinValue;
+            SetState(KeeperState.Absent);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>Removes the pairing and forgets the address; the next matching pult seen is learned.</summary>
+    public async Task ForgetPultAsync()
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_address is null) return;
+            await UnpairIfPairedAsync("forget").ConfigureAwait(false);
+            _address = null;
+            _settings.PultAddress = null;
+            _store.Save(_settings);
+            _failures = 0;
+            _notBefore = DateTimeOffset.MinValue;
+            _log("pult forgotten");
+            SetState(_settings.Paused ? KeeperState.Paused : KeeperState.Absent);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task UnpairIfPairedAsync(string why)
+    {
+        if (_address is not { } address) return;
+        try
+        {
+            if (await _bt.IsPairedAsync(address).ConfigureAwait(false))
+            {
+                bool removed = await _bt.UnpairAsync(address).ConfigureAwait(false);
+                _log(removed ? $"{why}: pairing removed" : $"{why}: removing the pairing failed");
+            }
+        }
+        catch (Exception e)
+        {
+            _log($"{why}: removing the pairing threw: {e.Message}");
+        }
+    }
+
+    private async Task Guarded(Func<Task> action)
+    {
+        try
+        {
+            await action().ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            _log("unexpected error: " + e);
+        }
+    }
 
     public async Task HandleAdvertisementAsync(PultAdvertisement adv)
     {
