@@ -1,7 +1,8 @@
 namespace R1Keeper.Core;
 
 /// <summary>One Bluetooth LE advertisement seen on the air.</summary>
-public readonly record struct PultAdvertisement(ulong Address, string LocalName);
+/// <param name="Timestamp">When the radio received it; default = unknown.</param>
+public readonly record struct PultAdvertisement(ulong Address, string LocalName, DateTimeOffset Timestamp = default);
 
 /// <summary>
 /// Everything the pairing logic needs from Bluetooth. The logic never caches pairing or

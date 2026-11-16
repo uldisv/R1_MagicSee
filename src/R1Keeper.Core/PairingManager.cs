@@ -42,6 +42,7 @@ public sealed class PairingManager
     // every round looks like a success.
     private static readonly TimeSpan PairingMustHold = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan MaxAdvertisementAge = TimeSpan.FromSeconds(3);
     private readonly TimeSpan _operationTimeout;
     private DateTimeOffset _lastPairSuccess;
     private bool _pairingUnproven;
@@ -247,6 +248,9 @@ public sealed class PairingManager
     {
         if (_state == KeeperState.Paused) return;
 
+        // An advertisement that was received a while ago says nothing about the pult now.
+        if (adv.Timestamp != default && _now() - adv.Timestamp > MaxAdvertisementAge) return;
+
         // Cheap filters before taking the lock: the air is full of other devices.
         var known = _address;
         if (known is not null)
@@ -274,23 +278,40 @@ public sealed class PairingManager
             if (_now() < _notBefore) return;
             ulong address = _address!.Value;
 
-            // The pult is advertising again. Did the last pairing hold long enough to count?
-            if (_pairingUnproven)
-            {
-                _pairingUnproven = false;
-                if (_now() - _lastPairSuccess >= PairingMustHold)
-                {
-                    _failures = 0;
-                }
-                else if (Fail("the last pairing did not hold") > TimeSpan.Zero)
-                {
-                    return;
-                }
-            }
-
             try
             {
-                if (await Bounded(_bt.IsPairedAsync(address)))
+                bool paired = await Bounded(_bt.IsPairedAsync(address));
+                if (paired && await Bounded(_bt.IsConnectedAsync(address)))
+                {
+                    // An advertisement, yet the link is up. Windows does this: about a minute
+                    // after pairing it delivers an advertisement for the pult although the
+                    // pult is connected and silent on the air. The pairing is healthy.
+                    string age = adv.Timestamp == default ? "" : $" (received {(_now() - adv.Timestamp).TotalSeconds:F1} s ago)";
+                    _log("advertisement ignored: the link is up" + age);
+                    if (_state != KeeperState.Connected)
+                    {
+                        _bt.WatchLink(address);
+                        SetState(KeeperState.Connected);
+                    }
+                    return;
+                }
+
+                // The pult really is out of a working connection. Did the last pairing hold
+                // long enough to count as a success?
+                if (_pairingUnproven)
+                {
+                    _pairingUnproven = false;
+                    if (_now() - _lastPairSuccess >= PairingMustHold)
+                    {
+                        _failures = 0;
+                    }
+                    else if (Fail("the last pairing did not hold") > TimeSpan.Zero)
+                    {
+                        return;
+                    }
+                }
+
+                if (paired)
                 {
                     // A pairing exists but the pult is advertising, so the pairing is stale.
                     // Remove it; pairing happens on the next advertisement.

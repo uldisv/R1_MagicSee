@@ -91,4 +91,57 @@ public sealed class PairingManagerRobustnessTests
         await rig.Manager.PauseAsync().WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(KeeperState.Paused, rig.Manager.State);
     }
+
+    // Found on the real pult: about a minute after pairing, Windows delivers an
+    // "advertisement" for the pult although it is connected and silent on the air.
+    // Treating that as a stale pairing re-paired a healthy pult once a minute.
+    [Fact]
+    public async Task AdvertisementWhileLinkIsUp_IsIgnored()
+    {
+        var rig = Rig.WithSavedPult();
+        await rig.Advertise();
+        Assert.Equal(KeeperState.Connected, rig.Manager.State);
+        rig.Bt.Calls.Clear();
+        rig.Clock.Advance(TimeSpan.FromSeconds(60));
+
+        await rig.Advertise();                           // Paired and Connected are both still true
+        Assert.Empty(rig.Bt.Calls);
+        Assert.Equal(KeeperState.Connected, rig.Manager.State);
+    }
+
+    [Fact]
+    public async Task AdvertisementWhileLinkIsUp_DoesNotCountAsFailure()
+    {
+        var rig = Rig.WithSavedPult();
+        await rig.Advertise();
+        for (int i = 0; i < 10; i++) await rig.Advertise();   // phantom advertisements right after pairing
+
+        rig.Bt.Connected = false;                        // now the link really dies
+        await rig.Advertise();
+        Assert.Equal("unpair", rig.Bt.Calls[^1]);        // acted at once: the phantoms were not failures
+    }
+
+    [Fact]
+    public async Task StaleAdvertisement_IsIgnored()
+    {
+        var rig = Rig.WithSavedPult();
+        var old = new PultAdvertisement(Rig.R1, Rig.R1Name, rig.Clock.Now - TimeSpan.FromSeconds(10));
+        await rig.Manager.HandleAdvertisementAsync(old);
+        Assert.Empty(rig.Bt.Calls);
+
+        var fresh = new PultAdvertisement(Rig.R1, Rig.R1Name, rig.Clock.Now - TimeSpan.FromMilliseconds(200));
+        await rig.Manager.HandleAdvertisementAsync(fresh);
+        Assert.Equal(["pair", "watch"], rig.Bt.Calls);
+    }
+
+    [Fact]
+    public async Task LinkUpButManagerSaysAbsent_AdvertisementAdoptsThePultInsteadOfUnpairing()
+    {
+        var rig = Rig.WithSavedPult();
+        rig.Bt.Paired = true;
+        rig.Bt.Connected = true;                         // e.g. the user paired it in Windows settings
+        await rig.Advertise();
+        Assert.Equal(["watch"], rig.Bt.Calls);
+        Assert.Equal(KeeperState.Connected, rig.Manager.State);
+    }
 }

@@ -96,7 +96,7 @@ public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDi
             _lastListenProblem = null;
             log("listening for advertisements again");
         }
-        AdvertisementReceived?.Invoke(new PultAdvertisement(e.BluetoothAddress, e.Advertisement.LocalName ?? ""));
+        AdvertisementReceived?.Invoke(new PultAdvertisement(e.BluetoothAddress, e.Advertisement.LocalName ?? "", e.Timestamp));
     }
 
     private void OnStopped(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementWatcherStoppedEventArgs e)
