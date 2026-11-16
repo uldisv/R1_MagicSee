@@ -24,6 +24,40 @@ internal static class Program
             Task.Run(() => ProbeAsync(log)).GetAwaiter().GetResult();
             return;
         }
+
+        // One instance per user session; a second start ends quietly.
+        using var single = new Mutex(initiallyOwned: true, @"Local\R1Keeper.SingleInstance", out bool isFirst);
+        if (!isFirst) return;
+
+        // Nothing here may ever show a window: log unexpected errors instead.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => log.Write("unhandled UI error: " + e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => log.Write("unhandled error: " + e.ExceptionObject);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            log.Write("unobserved task error: " + e.Exception);
+            e.SetObserved();
+        };
+
+        ApplicationConfiguration.Initialize();
+        try { Autostart.RepairPath(); }
+        catch (Exception e) { log.Write("repairing autostart failed: " + e.Message); }
+
+        log.Write("R1 Keeper started");
+        using var bluetooth = new WinRtPultBluetooth(log.Write);
+        using var reader = new ConsumerReportReader(log.Write);
+        var manager = new PairingManager(bluetooth, new JsonSettingsStore(AppPaths.SettingsFile), new RetryPolicy(), () => DateTimeOffset.UtcNow, log.Write);
+        manager.StateChanged += state => log.Write("state: " + state);
+        using var tray = new TrayApp(manager, bluetooth, reader, new ModeReminder(), log.Write);
+
+        _ = Task.Run(async () =>
+        {
+            try { await manager.StartAsync(); }
+            catch (Exception e) { log.Write("start failed: " + e); }
+        });
+
+        Application.Run(tray);
+        log.Write("R1 Keeper exited");
     }
 
     /// <summary>
