@@ -225,6 +225,21 @@ Pats pirmais spiediens mūzikas režīmā skaļumu tomēr nomainīs — to progr
   set up your Magicsee R1". Ja tas traucē, jāskatās, vai to var novērst.
 - Katra pārošana rada Windows ierīces pievienošanas/atvienošanas skaņas.
 
+## Būvēšanas laikā atklātais (papildināts pēc pārbaudes ar pulti)
+
+- **Sludinājums nenozīmē, ka pults nav savienojumā.** Apmēram 60 s pēc katras pārošanas
+  Windows piegādā pults sludinājumu, lai gan saite ir dzīva. Sākotnējais noteikums
+  "sludinājums + sapārota → noņemt pārošanu" tāpēc reizi minūtē lieki pāroja veselu pulti.
+  Noteikums ir mainīts: pārošanu noņem tikai tad, ja pults sludina **un saite nav
+  pievienota**. Sludinājumi, kas vecāki par 3 s, tiek atmesti.
+- **Pārošana, kas izdodas, bet neturas.** Pārošana par veiksmi skaitās tikai tad, ja tā
+  noturas 30 s; citādi tā skaitās neveiksme un stājas spēkā pieaugošā pauze.
+- **Bluetooth izsaukumiem ir 60 s noilgums**, lai iestrēdzis izsaukums neapturētu programmu.
+- Pults aizmieg pēc ~5 min bez pogu spiešanas un pēc pamošanās atkal ir mūzikas režīmā.
+  Pamošanās līdz lietojamai pultij: 1,7 s.
+- Pārbaudes sesijā: 18 veiksmīgas pārošanas; 4 neveiksmīgi mēģinājumi, visi ātras
+  izslēgšanas/ieslēgšanas gadījumā un katram sekoja veiksmīgs.
+
 ## Mani pieņēmumi (nevis lietotāja lēmumi)
 
 - Nosaukums "R1 Keeper".

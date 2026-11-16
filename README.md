@@ -47,6 +47,25 @@ Izvēlne (labais klikšķis uz ikonas):
 | Priekšējā augšējā | poga 8 |
 | Priekšējā apakšējā | poga 7 |
 
+## Kas zināms no pārbaudēm ar īsto pulti
+
+Pārbaudīts 2026-11-16 uz Windows 11 Insider būvējuma 26300 ar vienu pulti.
+
+- Pēc pults ieslēgšanas vai pamošanās tā ir lietojama apmēram 2 sekundēs. Ja pulti
+  izslēdz un ieslēdz dažu sekunžu laikā, tas var aizņemt līdz 15 sekundēm.
+- Pults pati aizmieg pēc apmēram 5 minūtēm bez pogu spiešanas; pamodina jebkura poga.
+- Spēļu režīmu pults neatceras ne pēc izslēgšanas, ne pēc aizmigšanas. Pēc katras
+  pamošanās jāspiež M + B. No datora režīmu pārslēgt nevar.
+- Pirmais spiediens mūzikas režīmā nomaina skaļumu, pirms parādās atgādinājums.
+- Dažas pogas spēļu režīmā nospiež divas kontroliera pogas reizē. Tā ir pults īpatnība;
+  programma pogas nepārkartē.
+- Apmēram minūti pēc katras pārošanas Windows piegādā pults sludinājumu, lai gan pults ir
+  pievienota. Programma to ignorē; žurnālā tas redzams kā
+  `advertisement ignored: the link is up`.
+- Katra pārošana rada Windows ierīces pievienošanas skaņu.
+- Nav pārbaudīts: datora miegs ar ieslēgtu programmu, Bluetooth izslēgšana un ieslēgšana,
+  citi Windows būvējumi.
+
 ## Faili
 
 - Žurnāls: `%LOCALAPPDATA%\R1Keeper\r1keeper.log`
