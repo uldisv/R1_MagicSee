@@ -36,13 +36,24 @@ public sealed class PairingManager
     private volatile KeeperState _state;
     private bool _subscribed;
 
-    public PairingManager(IPultBluetooth bt, ISettingsStore store, RetryPolicy retry, Func<DateTimeOffset> now, Action<string> log)
+    // A pairing only counts as a success once it has held for a while. Without this, a
+    // pairing that succeeds and then drops at once (weak battery, edge of range, a Windows
+    // build where a fresh pairing does not stick) would cycle unpair/pair forever, because
+    // every round looks like a success.
+    private static readonly TimeSpan PairingMustHold = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(60);
+    private readonly TimeSpan _operationTimeout;
+    private DateTimeOffset _lastPairSuccess;
+    private bool _pairingUnproven;
+
+    public PairingManager(IPultBluetooth bt, ISettingsStore store, RetryPolicy retry, Func<DateTimeOffset> now, Action<string> log, TimeSpan? operationTimeout = null)
     {
         _bt = bt;
         _store = store;
         _retry = retry;
         _now = now;
         _log = log;
+        _operationTimeout = operationTimeout ?? DefaultOperationTimeout;
         _settings = store.Load();
         _address = Settings.ParseAddress(_settings.PultAddress);
         _state = _settings.Paused ? KeeperState.Paused : KeeperState.Absent;
@@ -68,8 +79,8 @@ public sealed class PairingManager
             {
                 try
                 {
-                    if (await _bt.IsPairedAsync(address).ConfigureAwait(false) &&
-                        await _bt.IsConnectedAsync(address).ConfigureAwait(false))
+                    if (await Bounded(_bt.IsPairedAsync(address)) &&
+                        await Bounded(_bt.IsConnectedAsync(address)))
                     {
                         // If this pairing is in fact stale, the pult will advertise and the
                         // advertisement rule takes over.
@@ -119,12 +130,12 @@ public sealed class PairingManager
             bool connected = true;
             try
             {
-                connected = await _bt.IsConnectedAsync(address).ConfigureAwait(false);
+                connected = await Bounded(_bt.IsConnectedAsync(address));
                 // A live link means this event is late: it was queued before a fresh
                 // re-pair. Leave that pairing alone.
-                if (!connected && await _bt.IsPairedAsync(address).ConfigureAwait(false))
+                if (!connected && await Bounded(_bt.IsPairedAsync(address)))
                 {
-                    bool removed = await _bt.UnpairAsync(address).ConfigureAwait(false);
+                    bool removed = await Bounded(_bt.UnpairAsync(address));
                     _log(removed ? "link lost; pairing removed" : "link lost; removing the pairing failed");
                 }
             }
@@ -170,6 +181,7 @@ public sealed class PairingManager
             _settings.Paused = false;
             _store.Save(_settings);
             _failures = 0;
+            _pairingUnproven = false;
             _notBefore = DateTimeOffset.MinValue;
             SetState(KeeperState.Absent);
         }
@@ -191,6 +203,7 @@ public sealed class PairingManager
             _settings.PultAddress = null;
             _store.Save(_settings);
             _failures = 0;
+            _pairingUnproven = false;
             _notBefore = DateTimeOffset.MinValue;
             _log("pult forgotten");
             SetState(_settings.Paused ? KeeperState.Paused : KeeperState.Absent);
@@ -206,9 +219,9 @@ public sealed class PairingManager
         if (_address is not { } address) return;
         try
         {
-            if (await _bt.IsPairedAsync(address).ConfigureAwait(false))
+            if (await Bounded(_bt.IsPairedAsync(address)))
             {
-                bool removed = await _bt.UnpairAsync(address).ConfigureAwait(false);
+                bool removed = await Bounded(_bt.UnpairAsync(address));
                 _log(removed ? $"{why}: pairing removed" : $"{why}: removing the pairing failed");
             }
         }
@@ -261,14 +274,28 @@ public sealed class PairingManager
             if (_now() < _notBefore) return;
             ulong address = _address!.Value;
 
+            // The pult is advertising again. Did the last pairing hold long enough to count?
+            if (_pairingUnproven)
+            {
+                _pairingUnproven = false;
+                if (_now() - _lastPairSuccess >= PairingMustHold)
+                {
+                    _failures = 0;
+                }
+                else if (Fail("the last pairing did not hold") > TimeSpan.Zero)
+                {
+                    return;
+                }
+            }
+
             try
             {
-                if (await _bt.IsPairedAsync(address).ConfigureAwait(false))
+                if (await Bounded(_bt.IsPairedAsync(address)))
                 {
                     // A pairing exists but the pult is advertising, so the pairing is stale.
                     // Remove it; pairing happens on the next advertisement.
                     SetState(KeeperState.Pairing);
-                    if (await _bt.UnpairAsync(address).ConfigureAwait(false))
+                    if (await Bounded(_bt.UnpairAsync(address)))
                     {
                         _log("old pairing removed; pairing on the next advertisement");
                     }
@@ -280,9 +307,11 @@ public sealed class PairingManager
                 }
 
                 SetState(KeeperState.Pairing);
-                if (await _bt.PairAsync(address).ConfigureAwait(false))
+                if (await Bounded(_bt.PairAsync(address)))
                 {
-                    _failures = 0;
+                    // _failures is cleared later, once this pairing has proven it holds
+                    _lastPairSuccess = _now();
+                    _pairingUnproven = true;
                     _notBefore = DateTimeOffset.MinValue;
                     _bt.WatchLink(address);
                     _log("paired");
@@ -313,14 +342,24 @@ public sealed class PairingManager
         PultLearned?.Invoke(address);
     }
 
-    private void Fail(string what)
+    /// <returns>How long the program now waits before acting again (zero for the free retries).</returns>
+    private TimeSpan Fail(string what)
     {
         _failures++;
         var delay = _retry.DelayAfterFailure(_failures);
         _notBefore = _now() + delay;
         _log($"{what} (failure {_failures} in a row, next attempt in {delay.TotalSeconds:0} s)");
         SetState(KeeperState.Absent);
+        return delay;
     }
+
+    /// <summary>
+    /// Bluetooth calls run while the gate is held; one that never completed (radio switched
+    /// off or PC asleep mid-operation) would silently stop the program for good. A timeout
+    /// turns that into an ordinary failure.
+    /// </summary>
+    private System.Runtime.CompilerServices.ConfiguredTaskAwaitable<bool> Bounded(Task<bool> call) =>
+        call.WaitAsync(_operationTimeout).ConfigureAwait(false);
 
     private void SetState(KeeperState state)
     {

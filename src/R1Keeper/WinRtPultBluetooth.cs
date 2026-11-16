@@ -17,11 +17,11 @@ namespace R1Keeper;
 /// </summary>
 public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDisposable
 {
-    private static readonly TimeSpan RestartDelay = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan HealthInterval = TimeSpan.FromSeconds(10);
 
     private readonly object _sync = new();
     private BluetoothLEAdvertisementWatcher? _watcher;
-    private System.Threading.Timer? _restartTimer;
+    private System.Threading.Timer? _healthTimer;
     private bool _running;
     private string? _lastListenProblem;
 
@@ -31,11 +31,18 @@ public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDi
     public event Action<PultAdvertisement>? AdvertisementReceived;
     public event Action<ulong>? LinkLost;
 
-    /// <summary>Never throws. If listening cannot start or stops (radio off, PC sleep), it is retried every 10 s.</summary>
+    /// <summary>
+    /// Never throws. Every 10 s a health check restarts listening if it is not running:
+    /// the radio was off, the PC slept, or the watcher died without telling anyone.
+    /// </summary>
     public void Start()
     {
-        lock (_sync) _running = true;
-        TryStartWatcher();
+        lock (_sync)
+        {
+            _running = true;
+            _healthTimer ??= new System.Threading.Timer(_ => EnsureListening(), null, HealthInterval, HealthInterval);
+        }
+        EnsureListening();
     }
 
     public void Stop()
@@ -46,29 +53,38 @@ public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDi
             _running = false;
             watcher = _watcher;
             _watcher = null;
-            _restartTimer?.Dispose();
-            _restartTimer = null;
+            _healthTimer?.Dispose();
+            _healthTimer = null;
         }
         try { watcher?.Stop(); } catch (Exception) { /* already stopped */ }
     }
 
-    private void TryStartWatcher()
+    private void EnsureListening()
     {
         lock (_sync)
         {
-            if (!_running || _watcher is not null) return;
+            if (!_running) return;
+            if (_watcher is not null)
+            {
+                var status = _watcher.Status;
+                if (status is BluetoothLEAdvertisementWatcherStatus.Created or BluetoothLEAdvertisementWatcherStatus.Started) return;
+                ReportListenProblem("listening for advertisements is not running: " + status);
+                _watcher = null;
+            }
+
+            // Stored before Start(): if Stopped is raised during Start, OnStopped must recognise it.
+            var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+            watcher.Received += OnReceived;
+            watcher.Stopped += OnStopped;
+            _watcher = watcher;
             try
             {
-                var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-                watcher.Received += OnReceived;
-                watcher.Stopped += OnStopped;
                 watcher.Start();
-                _watcher = watcher;
             }
             catch (Exception e)
             {
+                _watcher = null;
                 ReportListenProblem("cannot listen for advertisements: " + e.Message);
-                ScheduleRestart();
             }
         }
     }
@@ -88,25 +104,17 @@ public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDi
         lock (_sync)
         {
             if (!ReferenceEquals(sender, _watcher)) return;
-            _watcher = null;
-            if (!_running) return;
-            ReportListenProblem("listening for advertisements stopped: " + e.Error);
-            ScheduleRestart();
+            _watcher = null; // the health check starts a new one
+            if (_running) ReportListenProblem("listening for advertisements stopped: " + e.Error);
         }
     }
 
     private void ReportListenProblem(string problem)
     {
-        // The retry runs every 10 s; log a persisting problem only once.
+        // The health check runs every 10 s; log a persisting problem only once.
         if (problem == _lastListenProblem) return;
         _lastListenProblem = problem;
         log(problem + "; retrying every 10 s");
-    }
-
-    private void ScheduleRestart()
-    {
-        _restartTimer?.Dispose();
-        _restartTimer = new System.Threading.Timer(_ => TryStartWatcher(), null, RestartDelay, Timeout.InfiniteTimeSpan);
     }
 
     public async Task<bool> IsPairedAsync(ulong address)
@@ -145,52 +153,87 @@ public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDi
     {
         var timer = Stopwatch.StartNew();
         ReleaseWatched(address);
-        using var device = await OpenAsync(address).ConfigureAwait(false);
+        var device = await OpenAsync(address).ConfigureAwait(false);
         if (device is null)
         {
             log("pair: cannot open the device");
             return false;
         }
-        var custom = device.DeviceInformation.Pairing.Custom;
-        custom.PairingRequested += (_, e) =>
+        bool paired = false;
+        try
         {
-            if (e.PairingKind == DevicePairingKinds.ConfirmOnly) e.Accept();
-        };
-        var result = await custom.PairAsync(DevicePairingKinds.ConfirmOnly, DevicePairingProtectionLevel.Default);
-        log($"pair -> {result.Status} ({timer.Elapsed.TotalSeconds:F1} s)");
-        return result.Status is DevicePairingResultStatus.Paired or DevicePairingResultStatus.AlreadyPaired;
+            var custom = device.DeviceInformation.Pairing.Custom;
+            custom.PairingRequested += (_, e) =>
+            {
+                if (e.PairingKind == DevicePairingKinds.ConfirmOnly) e.Accept();
+            };
+            var result = await custom.PairAsync(DevicePairingKinds.ConfirmOnly, DevicePairingProtectionLevel.Default);
+            log($"pair -> {result.Status} ({timer.Elapsed.TotalSeconds:F1} s)");
+            paired = result.Status is DevicePairingResultStatus.Paired or DevicePairingResultStatus.AlreadyPaired;
+
+            // Keep this very object as the link watcher: its status is already current, so a
+            // link-lost event that was queued before this pairing cannot be mistaken for a
+            // dead link in the moment before a separate watcher object would have caught up.
+            if (paired) Hold(device, address);
+            return paired;
+        }
+        finally
+        {
+            if (!paired) device.Dispose();
+        }
     }
 
-    public void WatchLink(ulong address) => _ = WatchLinkAsync(address);
+    public void WatchLink(ulong address)
+    {
+        lock (_sync)
+        {
+            if (_watched is not null && _watchedAddress == address) return; // already watching (set by PairAsync)
+        }
+        _ = WatchLinkAsync(address);
+    }
 
     private async Task WatchLinkAsync(ulong address)
     {
         try
         {
-            ReleaseWatched(address);
             var device = await OpenAsync(address).ConfigureAwait(false);
             if (device is null)
             {
                 log("watch link: cannot open the device");
                 return;
             }
-            device.ConnectionStatusChanged += (sender, _) =>
-            {
-                if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected) LinkLost?.Invoke(address);
-            };
-            BluetoothLEDevice? previous;
-            lock (_sync)
-            {
-                previous = _watched;
-                _watched = device;
-                _watchedAddress = address;
-            }
-            previous?.Dispose();
+            Hold(device, address);
+            // The link may have dropped before the subscription existed.
+            if (device.ConnectionStatus == BluetoothConnectionStatus.Disconnected) LinkLost?.Invoke(address);
         }
         catch (Exception e)
         {
             log("watch link failed: " + e.Message);
         }
+    }
+
+    private void Hold(BluetoothLEDevice device, ulong address)
+    {
+        device.ConnectionStatusChanged += OnConnectionStatusChanged;
+        BluetoothLEDevice? previous;
+        lock (_sync)
+        {
+            previous = _watched;
+            _watched = device;
+            _watchedAddress = address;
+        }
+        Release(previous);
+    }
+
+    private void OnConnectionStatusChanged(BluetoothLEDevice sender, object args)
+    {
+        ulong address;
+        lock (_sync)
+        {
+            if (!ReferenceEquals(sender, _watched)) return; // an object we already let go of
+            address = _watchedAddress;
+        }
+        if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected) LinkLost?.Invoke(address);
     }
 
     private void ReleaseWatched(ulong address)
@@ -204,7 +247,14 @@ public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDi
                 _watched = null;
             }
         }
-        previous?.Dispose();
+        Release(previous);
+    }
+
+    private void Release(BluetoothLEDevice? device)
+    {
+        if (device is null) return;
+        try { device.ConnectionStatusChanged -= OnConnectionStatusChanged; } catch (Exception) { /* already gone */ }
+        device.Dispose();
     }
 
     /// <summary>Opens a fresh device object; Windows can need a moment after an advertisement or an unpair.</summary>
@@ -228,6 +278,6 @@ public sealed class WinRtPultBluetooth(Action<string> log) : IPultBluetooth, IDi
             previous = _watched;
             _watched = null;
         }
-        previous?.Dispose();
+        Release(previous);
     }
 }

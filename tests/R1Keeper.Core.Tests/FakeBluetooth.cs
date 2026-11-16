@@ -37,11 +37,14 @@ internal sealed class FakeBluetooth : IPultBluetooth
 
     public Task<bool> IsConnectedAsync(ulong address) => Task.FromResult(Connected);
 
-    public Task<bool> UnpairAsync(ulong address)
+    public TaskCompletionSource? UnpairGate { get; set; }   // when set, UnpairAsync waits for it
+
+    public async Task<bool> UnpairAsync(ulong address)
     {
         Record("unpair", address);
+        if (UnpairGate is not null) await UnpairGate.Task;
         if (UnpairResult) { Paired = false; Connected = false; }
-        return Task.FromResult(UnpairResult);
+        return UnpairResult;
     }
 
     public async Task<bool> PairAsync(ulong address)
@@ -96,17 +99,17 @@ internal sealed class Rig
     public readonly List<ulong> Learned = new();
     public readonly PairingManager Manager;
 
-    public Rig(Action<Settings>? configure = null)
+    public Rig(Action<Settings>? configure = null, TimeSpan? operationTimeout = null)
     {
         configure?.Invoke(Store.Settings);
-        Manager = new PairingManager(Bt, Store, new RetryPolicy(), () => Clock.Now, m => { lock (Log) Log.Add(m); });
+        Manager = new PairingManager(Bt, Store, new RetryPolicy(), () => Clock.Now, m => { lock (Log) Log.Add(m); }, operationTimeout);
         Manager.StateChanged += s => States.Add(s);
         Manager.PultLearned += a => Learned.Add(a);
     }
 
     /// <summary>A rig whose saved pult is the R1.</summary>
-    public static Rig WithSavedPult(Action<Settings>? configure = null) =>
-        new(s => { s.PultAddress = "FFFF385D4001"; configure?.Invoke(s); });
+    public static Rig WithSavedPult(Action<Settings>? configure = null, TimeSpan? operationTimeout = null) =>
+        new(s => { s.PultAddress = "FFFF385D4001"; configure?.Invoke(s); }, operationTimeout);
 
     public Task Advertise(ulong address = R1, string name = R1Name) =>
         Manager.HandleAdvertisementAsync(new PultAdvertisement(address, name));

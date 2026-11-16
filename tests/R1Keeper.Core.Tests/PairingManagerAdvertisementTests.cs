@@ -87,13 +87,14 @@ public sealed class PairingManagerAdvertisementTests
     }
 
     [Fact]
-    public async Task PairSucceeds_ResetsFailureCount()
+    public async Task PairingThatHeld_ResetsFailureCount()
     {
         var rig = Rig.WithSavedPult();
         foreach (var r in new[] { false, false, false, true }) rig.Bt.PairResults.Enqueue(r);
         for (int i = 0; i < 4; i++) await rig.Advertise();
         Assert.Equal(KeeperState.Connected, rig.Manager.State);
 
+        rig.Clock.Advance(TimeSpan.FromSeconds(30));    // the pairing held, so it counts as a success
         rig.Bt.Paired = false;
         rig.Bt.Connected = false;
         rig.Bt.PairResults.Enqueue(false);
