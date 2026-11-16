@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/R1Keeper.Core/R1Keeper.Core.csproj" />
+    <Project Path="src/R1Keeper/R1Keeper.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/R1Keeper.Core.Tests/R1Keeper.Core.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>R1Keeper</AssemblyName>
+    <RootNamespace>R1Keeper</RootNamespace>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\R1Keeper.Core\R1Keeper.Core.csproj" />
+  </ItemGroup>
+
+</Project>
