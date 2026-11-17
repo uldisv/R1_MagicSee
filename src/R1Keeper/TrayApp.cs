@@ -12,7 +12,6 @@ namespace R1Keeper;
 internal sealed class TrayApp : ApplicationContext
 {
     private const string Title = "R1 Keeper";
-    private const string MusicModeText = "Pults ir mūzikas režīmā. Nospied M + B, lai pārslēgtu uz spēļu režīmu.";
 
     private readonly PairingManager _manager;
     private readonly WinRtPultBluetooth _bluetooth;
@@ -25,8 +24,16 @@ internal sealed class TrayApp : ApplicationContext
     private readonly Dictionary<KeeperState, Icon> _icons = new();
     private readonly ToolStripMenuItem _statusItem = new() { Enabled = false };
     private readonly ToolStripMenuItem _pauseItem = new();
-    private readonly ToolStripMenuItem _forgetItem = new("Aizmirst pulti");
-    private readonly ToolStripMenuItem _autostartItem = new("Startēt kopā ar Windows");
+    private readonly ToolStripMenuItem _forgetItem = new();
+    private readonly ToolStripMenuItem _autostartItem = new();
+    private readonly ToolStripMenuItem _languageItem = new();
+    private readonly ToolStripMenuItem _openLogItem = new();
+    private readonly ToolStripMenuItem _exitItem = new();
+
+    private UiLanguage _language;
+    private UiText _text;
+    private KeeperState _shownState;   // the state the icon shows
+    private bool _exiting;
 
     public TrayApp(PairingManager manager, WinRtPultBluetooth bluetooth, ConsumerReportReader reader, ModeReminder reminder, Action<string> log)
     {
@@ -35,6 +42,9 @@ internal sealed class TrayApp : ApplicationContext
         _reader = reader;
         _reminder = reminder;
         _log = log;
+
+        _language = SafeLoadLanguage();
+        _text = UiText.For(_language);
 
         _ui.CreateControl();
         _ = _ui.Handle;
@@ -50,39 +60,58 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_pauseItem);
         menu.Items.Add(_forgetItem);
         menu.Items.Add(_autostartItem);
-        menu.Items.Add(new ToolStripMenuItem("Atvērt žurnālu", null, (_, _) => OpenLog()));
+        menu.Items.Add(_languageItem);
+        menu.Items.Add(_openLogItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Iziet", null, (_, _) => Exit()));
+        menu.Items.Add(_exitItem);
         menu.Opening += (_, _) => RefreshMenu();
+
+        foreach (var language in UiLanguages.All)
+        {
+            // Each language is named in itself, so the list reads the same whatever the menu language.
+            var item = new ToolStripMenuItem(UiLanguages.NativeName(language)) { Tag = language };
+            item.Click += (_, _) => ChangeLanguage(language);
+            _languageItem.DropDownItems.Add(item);
+        }
 
         _pauseItem.Click += (_, _) => Run(_manager.State == KeeperState.Paused ? _manager.ResumeAsync : _manager.PauseAsync);
         _forgetItem.Click += (_, _) => Run(_manager.ForgetPultAsync);
         _autostartItem.Click += (_, _) => ToggleAutostart();
+        _openLogItem.Click += (_, _) => OpenLog();
+        _exitItem.Click += (_, _) => Exit();
 
+        ApplyTexts();
         _icon.ContextMenuStrip = menu;
         _icon.Visible = true;
 
         _manager.StateChanged += state => OnUi(() => ShowState(state));
-        _manager.PultLearned += address => OnUi(() => Balloon("Pults iegaumēta: " + Settings.DisplayAddress(address)));
-        _reminder.MusicModeDetected += () => OnUi(() => Balloon(MusicModeText));
+        _manager.PultLearned += address => OnUi(() => Balloon(_text.PultLearned(Settings.DisplayAddress(address))));
+        _reminder.MusicModeDetected += () => OnUi(() => Balloon(_text.MusicMode));
         _reader.ReportReceived += report => _reminder.OnConsumerReport(report);
 
         ShowState(_manager.State);
     }
 
-    private static string StateText(KeeperState state) => state switch
+    /// <summary>Closes the program from another thread (used when the installer asks it to exit).</summary>
+    public void RequestExit() => OnUi(Exit);
+
+    private void ApplyTexts()
     {
-        KeeperState.Pairing => "R1 Keeper — notiek pārošana",
-        KeeperState.Connected => "R1 Keeper — pults pievienota",
-        KeeperState.Paused => "R1 Keeper — pauzēts",
-        _ => "R1 Keeper — pults nav redzama",
-    };
+        _forgetItem.Text = _text.Forget;
+        _autostartItem.Text = _text.Autostart;
+        _languageItem.Text = _text.Language;
+        _openLogItem.Text = _text.OpenLog;
+        _exitItem.Text = _text.Exit;
+        RefreshMenu();
+        _icon.Text = _text.State(_shownState);
+    }
 
     private void ShowState(KeeperState state)
     {
+        _shownState = state;
         _icon.Icon = _icons[state];
-        _icon.Text = StateText(state);
-        _statusItem.Text = StateText(state);
+        _icon.Text = _text.State(state);
+        _statusItem.Text = _text.State(state);
 
         // The mode reminder only makes sense while the pult is connected.
         if (state == KeeperState.Connected && _manager.PultAddress is { } address)
@@ -98,10 +127,30 @@ internal sealed class TrayApp : ApplicationContext
 
     private void RefreshMenu()
     {
-        _statusItem.Text = StateText(_manager.State);
-        _pauseItem.Text = _manager.State == KeeperState.Paused ? "Turpināt" : "Pauzēt";
+        _statusItem.Text = _text.State(_manager.State);
+        _pauseItem.Text = _manager.State == KeeperState.Paused ? _text.Resume : _text.Pause;
         _forgetItem.Enabled = _manager.PultAddress is not null;
         _autostartItem.Checked = SafeAutostartEnabled();
+        foreach (ToolStripMenuItem item in _languageItem.DropDownItems)
+            item.Checked = (UiLanguage)item.Tag! == _language;
+    }
+
+    private UiLanguage SafeLoadLanguage()
+    {
+        try { return LanguagePreference.Load(); }
+        catch (Exception e) { _log("reading the language failed: " + e.Message); return UiLanguages.Default; }
+    }
+
+    private void ChangeLanguage(UiLanguage language)
+    {
+        if (language == _language) return;
+        // Switch even if saving fails, so the choice holds at least until the program exits.
+        try { LanguagePreference.Save(language); }
+        catch (Exception e) { _log("saving the language failed: " + e.Message); }
+        _log("language: " + UiLanguages.Code(language));
+        _language = language;
+        _text = UiText.For(language);
+        ApplyTexts();
     }
 
     private bool SafeAutostartEnabled()
@@ -143,6 +192,8 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Leaves the pairing alone: the pult keeps working until its next disconnect.</summary>
     private void Exit()
     {
+        if (_exiting) return; // the menu and the installer can both ask
+        _exiting = true;
         _reader.Dispose();
         _bluetooth.Dispose();
         _icon.Visible = false;

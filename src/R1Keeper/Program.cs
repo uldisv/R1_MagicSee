@@ -10,6 +10,12 @@ internal static class AppPaths
     public static string LogFile => Path.Combine(DataDir, "r1keeper.log");
 
     public static string SettingsFile => Path.Combine(DataDir, "settings.json");
+
+    // Both names are also used by installer\R1Keeper.iss; keep them in step.
+    public const string SingleInstanceMutex = @"Local\R1Keeper.SingleInstance";
+
+    /// <summary>Signalling this event makes the running copy exit as if Exit had been clicked.</summary>
+    public const string ExitEvent = @"Local\R1Keeper.Exit";
 }
 
 internal static class Program
@@ -26,8 +32,9 @@ internal static class Program
         }
 
         // One instance per user session; a second start ends quietly.
-        using var single = new Mutex(initiallyOwned: true, @"Local\R1Keeper.SingleInstance", out bool isFirst);
+        using var single = new Mutex(initiallyOwned: true, AppPaths.SingleInstanceMutex, out bool isFirst);
         if (!isFirst) return;
+        using var exitRequest = new EventWaitHandle(false, EventResetMode.AutoReset, AppPaths.ExitEvent);
 
         // Nothing here may ever show a window: log unexpected errors instead.
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -50,6 +57,13 @@ internal static class Program
         manager.StateChanged += state => log.Write("state: " + state);
         using var tray = new TrayApp(manager, bluetooth, reader, new ModeReminder(), log.Write);
 
+        // The installer and uninstaller signal this to close the program before replacing its files.
+        var exitWait = ThreadPool.RegisterWaitForSingleObject(exitRequest, (_, _) =>
+        {
+            log.Write("exit requested by another program");
+            tray.RequestExit();
+        }, null, Timeout.Infinite, executeOnlyOnce: true);
+
         _ = Task.Run(async () =>
         {
             try { await manager.StartAsync(); }
@@ -57,6 +71,7 @@ internal static class Program
         });
 
         Application.Run(tray);
+        exitWait.Unregister(null);
         log.Write("R1 Keeper exited");
     }
 
